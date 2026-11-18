@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Photo Context Tagger</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Optional helpers: EXIF date/GPS and HEIC preview. Tagging still works if these fail to load. -->
+<script src="https://cdn.jsdelivr.net/npm/exifr@7/dist/full.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
+<style>
+  :root{--garnet:#73000A;--ink:#1d1d1f;--mute:#6e6e73;--line:#e3e3e8;--bg:#f6f6f8;--ok:#1f8a4c;}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;color:var(--ink);background:var(--bg);height:100vh;display:flex;flex-direction:column}
+  header{background:var(--garnet);color:#fff;padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0 10px 0 0;font-weight:600}
+  header button,header select{font:inherit;border:0;border-radius:6px;padding:6px 12px;cursor:pointer}
+  header button.primary{background:#fff;color:var(--garnet);font-weight:600}
+  header button.ghost{background:rgba(255,255,255,.15);color:#fff}
+  header button:disabled{opacity:.5;cursor:default}
+  header select{background:rgba(255,255,255,.15);color:#fff}
+  header select option{color:#000}
+  header .stat{margin-left:auto;opacity:.9;font-size:13px}
+  main{flex:1;display:flex;min-height:0}
+  #gridWrap{flex:1;overflow:auto;padding:14px;position:relative}
+  #gridWrap.drag{outline:3px dashed var(--garnet);outline-offset:-10px;background:#fbeff0}
+  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+  .tile{position:relative;background:#fff;border:2px solid transparent;border-radius:8px;overflow:hidden;cursor:pointer;user-select:none;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+  .tile.sel{border-color:var(--garnet);box-shadow:0 0 0 2px rgba(115,0,10,.18)}
+  .tile .ph{aspect-ratio:4/3;background:#ececf0;display:flex;align-items:center;justify-content:center;color:var(--mute);font-size:12px;text-align:center;padding:4px}
+  .tile img{width:100%;height:100%;object-fit:cover;display:block}
+  .tile .cap{padding:5px 7px;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tile .cap small{color:var(--mute)}
+  .tile .dot{position:absolute;top:6px;right:6px;width:12px;height:12px;border-radius:50%;background:#c7c7cc;border:2px solid #fff}
+  .tile.tagged .dot{background:var(--ok)}
+  .tile .ev{position:absolute;left:0;right:0;bottom:24px;background:rgba(0,0,0,.55);color:#fff;font-size:11px;padding:2px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  aside{width:440px;max-width:48vw;background:#fff;border-left:1px solid var(--line);overflow:auto;padding:16px 18px 90px}
+  #empty{color:var(--mute);padding:40px 10px;text-align:center}
+  #preview img{width:100%;max-height:300px;object-fit:contain;background:#111;border-radius:6px}
+  #preview .multi{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+  #preview .multi img{height:70px;object-fit:cover;background:#ddd}
+  #meta{font-size:12px;color:var(--mute);margin:6px 0 12px}
+  #meta a{color:var(--garnet)}
+  #batchNote{background:#fff4e5;border:1px solid #f0d3a8;border-radius:6px;padding:8px 10px;font-size:12.5px;margin-bottom:10px}
+  label.f{display:block;font-weight:600;font-size:12.5px;margin:10px 0 3px}
+  label.f small{font-weight:400;color:var(--mute)}
+  input[type=text],input[type=date],select.f,textarea{width:100%;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:#fff}
+  textarea{min-height:64px;resize:vertical}
+  input:focus,textarea:focus,select:focus{outline:2px solid rgba(115,0,10,.35);border-color:var(--garnet)}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  fieldset{border:1px solid var(--line);border-radius:6px;margin:14px 0 0;padding:6px 10px 8px}
+  fieldset legend{font-weight:600;font-size:12.5px;padding:0 4px}
+  fieldset label{display:flex;gap:8px;align-items:center;font-size:13px;margin:4px 0}
+  .bar{position:fixed;bottom:0;right:0;width:440px;max-width:48vw;background:#fff;border-top:1px solid var(--line);padding:10px 18px;display:flex;gap:8px;align-items:center}
+  .bar button{font:inherit;border-radius:6px;padding:8px 14px;cursor:pointer;border:1px solid var(--line);background:#fff}
+  .bar button.save{background:var(--garnet);color:#fff;border-color:var(--garnet);font-weight:600}
+  .bar button:disabled{opacity:.5}
+  .bar .hint{font-size:11.5px;color:var(--mute);margin-left:auto}
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1d1d1f;color:#fff;padding:8px 14px;border-radius:6px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:70vw}
+  #toast.show{opacity:1}
+  #welcome{max-width:640px;margin:50px auto;background:#fff;border-radius:10px;padding:24px 28px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  #welcome h2{margin-top:0;color:var(--garnet)}
+  #welcome code{background:#f2f2f5;padding:1px 5px;border-radius:4px}
+  #welcome li{margin:4px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Photo Context Tagger</h1>
+  <button class="primary" id="openFilesBtn">Open photos…</button>
+  <button class="primary" id="openDirBtn">Open folder…</button>
+  <button class="ghost" id="rescanBtn" disabled>Rescan</button>
+  <select id="filter" disabled>
+    <option value="all">All</option>
+    <option value="untagged">Untagged</option>
+    <option value="tagged">Tagged</option>
+  </select>
+  <select id="folderFilter" disabled><option value="">All folders</option></select>
+  <span class="stat" id="stat"></span>
+</header>
+<main>
+  <div id="gridWrap">
+    <div id="welcome">
+      <h2>Tag any photo with context</h2>
+      <p><b>Open photos…</b> to pick individual photos, <b>Open folder…</b> to work through a whole folder, or drag photos or folders from Finder onto this window.</p>
+      <ul>
+        <li><b>JPEG and PNG:</b> the context is written <i>into the photo file</i> as standard XMP metadata (title, caption, keywords, people, location), so it travels with the photo.</li>
+        <li><b>HEIC, TIFF, WebP, RAW:</b> a browser can't safely rewrite these, so the context goes in a standard <code>.xmp</code> file with the same name next to the photo (e.g. <code>IMG_1234.xmp</code>), the convention Lightroom and exiftool use.</li>
+      </ul>
+      <p>Select one photo, or <b>⌘-click / shift-click</b> a batch, fill in what you know, and press <b>Save</b> (<b>⌘↩</b> saves and moves on). Chrome will ask before it lets this page change files.</p>
+      <p style="color:#6e6e73;font-size:13px">Needs Google Chrome (or Edge). Nothing is uploaded; the page only reads and writes the files you choose. Photos inside the Apple Photos library can't be edited directly: drag them to a Finder folder first.</p>
+    </div>
+    <div id="grid"></div>
+  </div>
+  <aside>
+    <div id="empty">Select a photo to add context.</div>
+    <div id="editor" hidden>
+      <div id="preview"></div>
+      <div id="meta"></div>
+      <div id="batchNote" hidden></div>
+      <form id="form" autocomplete="off" onsubmit="return false">
+        <label class="f">Event / title</label>
+        <input type="text" id="f_event" list="dl_event" placeholder="e.g., Lowes Foods launch tasting, Charlotte">
+        <div class="row2">
+          <div><label class="f">Date</label><input type="date" id="f_date"></div>
+          <div><label class="f">Hat <small>(for LinkedIn)</small></label>
+            <select class="f" id="f_hat">
+              <option value="">—</option>
+              <option value="proof">PROOF (Chairman)</option>
+              <option value="mcnair">McNair / USC</option>
+              <option value="innovation">Broader innovation</option>
+              <option value="dirk">Personal / Dirk</option>
+            </select></div>
+        </div>
+        <label class="f">Venue / location</label>
+        <input type="text" id="f_location" list="dl_location" placeholder="e.g., Darla Moore School, Columbia SC">
+        <label class="f">Who's in it <small>(left to right, comma separated; blank if none)</small></label>
+        <input type="text" id="f_people" list="dl_people" placeholder="e.g., Jane Smith, me, Tom Lee">
+        <label class="f">Caption / what was happening</label>
+        <textarea id="f_story" placeholder="What's going on, why it mattered, anything a post should say"></textarea>
+        <label class="f">Post angle <small>(what this photo could illustrate)</small></label>
+        <textarea id="f_angle" placeholder="e.g., First retail tasting in NC; good for a 'how we earn shelf space' post"></textarea>
+        <label class="f">A line to use <small>(optional, your own words)</small></label>
+        <input type="text" id="f_quote" placeholder="Something you said or want quoted on a card">
+        <div class="row2">
+          <div><label class="f">Keywords <small>(comma separated)</small></label><input type="text" id="f_keywords" placeholder="tasting, retail, NC"></div>
+          <div><label class="f">Use</label>
+            <select class="f" id="f_timing">
+              <option value="">—</option>
+              <option value="soon">Use soon (timely)</option>
+              <option value="evergreen">Evergreen</option>
+              <option value="hold">Hold: don't use yet</option>
+              <option value="never">Never post</option>
+            </select></div>
+        </div>
+        <fieldset>
+          <legend>Rights &amp; people</legend>
+          <label><input type="checkbox" id="r_name_people"> OK to name the people in a post</label>
+          <label><input type="checkbox" id="r_students"> Shows students</label>
+          <label><input type="checkbox" id="r_minors"> Shows minors</label>
+          <label><input type="checkbox" id="r_private_guests"> Shows private guests / non-public people</label>
+        </fieldset>
+      </form>
+    </div>
+  </aside>
+</main>
+<div class="bar" id="bar" hidden>
+  <button class="save" id="saveBtn">Save</button>
+  <button id="saveNextBtn">Save &amp; next</button>
+  <span class="hint">⌘↩ save &amp; next · ←/→ move</span>
+</div>
+<datalist id="dl_event"></datalist>
+<datalist id="dl_location"></datalist>
+<datalist id="dl_people"></datalist>
+<div id="toast"></div>
+
+<script>
+"use strict";
+// ======================================================================
+//  XMP metadata: read / merge / write (JPEG APP1, PNG iTXt, .xmp sidecar)
+// ======================================================================
+const NS = {
+  x:"adobe:ns:meta/",
+  rdf:"http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+  dc:"http://purl.org/dc/elements/1.1/",
+  xmp:"http://ns.adobe.com/xap/1.0/",
+  photoshop:"http://ns.adobe.com/photoshop/1.0/",
+  Iptc4xmpCore:"http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/",
+  Iptc4xmpExt:"http://iptc.org/std/Iptc4xmpExt/2008-02-29/",
+  pctx:"http://ns.praxis-celeris.com/photo-context/1.0/"
+};
+const XMLNS = "http://www.w3.org/2000/xmlns/", XMLNS_XML = "http://www.w3.org/XML/1998/namespace";
+const enc = new TextEncoder(), dec = new TextDecoder();
+
+function cleanXmp(s){ return s ? s.replace(/^﻿/,"").replace(/\0+$/,"").trim() : s; }
+function parseXmp(str){
+  str = cleanXmp(str);
+  if(!str) return null;
+  const doc = new DOMParser().parseFromString(str, "application/xml");
+  if(doc.getElementsByTagName("parsererror").length) throw new Error("existing metadata in this file couldn't be read, so it was left untouched");
+  return doc;
+}
+function emptyXmp(){
+  return new DOMParser().parseFromString(
+    `<x:xmpmeta xmlns:x="${NS.x}" x:xmptk="Photo Context Tagger"><rdf:RDF xmlns:rdf="${NS.rdf}"><rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta>`,
+    "application/xml");
+}
+function serializeXmp(doc, pad=2048){
+  const root = doc.documentElement;
+  let body = new XMLSerializer().serializeToString(root);
+  if(root.localName === "RDF") body = `<x:xmpmeta xmlns:x="${NS.x}">${body}</x:xmpmeta>`;
+  const padding = (" ".repeat(99) + "\n").repeat(Math.ceil(pad/100));
+  return `<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>\n${body}\n${pad ? padding : ""}<?xpacket end="w"?>`;
+}
+const descs = doc => [...doc.getElementsByTagNameNS(NS.rdf, "Description")];
+const prefixFor = ns => Object.keys(NS).find(k => NS[k] === ns);
+function readProp(doc, ns, local){
+  for(const d of descs(doc)){
+    if(d.hasAttributeNS(ns, local)) return d.getAttributeNS(ns, local);
+    for(const c of d.children){
+      if(c.namespaceURI === ns && c.localName === local){
+        const lis = [...c.getElementsByTagNameNS(NS.rdf, "li")];
+        if(lis.length){
+          const def = lis.find(l => l.getAttributeNS(XMLNS_XML, "lang") === "x-default");
+          return def ? [def.textContent, ...lis.filter(l=>l!==def).map(l=>l.textContent)] : lis.map(l => l.textContent);
+        }
+        return c.textContent;
+      }
+    }
+  }
+  return null;
+}
+function removeProp(doc, ns, local){
+  for(const d of descs(doc)){
+    if(d.hasAttributeNS(ns, local)) d.removeAttributeNS(ns, local);
+    [...d.children].forEach(c => { if(c.namespaceURI === ns && c.localName === local) d.removeChild(c); });
+  }
+}
+function mainDesc(doc){
+  let d = descs(doc)[0];
+  if(!d){
+    const rdf = doc.getElementsByTagNameNS(NS.rdf, "RDF")[0];
+    d = doc.createElementNS(NS.rdf, "rdf:Description"); d.setAttributeNS(NS.rdf, "rdf:about", ""); rdf.appendChild(d);
+  }
+  return d;
+}
+function ensureNs(el, p, ns){ if(el.lookupNamespaceURI(p) !== ns) el.setAttributeNS(XMLNS, "xmlns:"+p, ns); }
+function setSimple(doc, ns, local, value){
+  removeProp(doc, ns, local);
+  if(value == null || value === "") return;
+  const d = mainDesc(doc), p = prefixFor(ns); ensureNs(d, p, ns);
+  const el = doc.createElementNS(ns, p+":"+local); el.textContent = value; d.appendChild(el);
+}
+function setList(doc, ns, local, type, values){
+  removeProp(doc, ns, local);
+  if(!values || !values.length) return;
+  const d = mainDesc(doc), p = prefixFor(ns); ensureNs(d, p, ns);
+  const el = doc.createElementNS(ns, p+":"+local), c = doc.createElementNS(NS.rdf, "rdf:"+type);
+  for(const v of values){
+    const li = doc.createElementNS(NS.rdf, "rdf:li");
+    if(type === "Alt") li.setAttributeNS(XMLNS_XML, "xml:lang", "x-default");
+    li.textContent = v; c.appendChild(li);
+  }
+  el.appendChild(c); d.appendChild(el);
+}
+const splitList = v => v ? v.split(",").map(s => s.trim()).filter(Boolean) : [];
+
+// form fields <-> XMP. Standard fields (title, caption, keywords, people, location, date) are what
+// Photos, Lightroom, Bridge and exiftool read; pctx:* holds the comms-specific context.
+const FIELD_WRITERS = {
+  event:    (doc,v) => { setSimple(doc,NS.pctx,"Event",v); setList(doc,NS.dc,"title","Alt",v?[v]:[]); },
+  date:     (doc,v) => { setSimple(doc,NS.pctx,"Date",v);
+                         const cur = readProp(doc,NS.photoshop,"DateCreated");
+                         if(v && !(typeof cur === "string" && cur.startsWith(v))) setSimple(doc,NS.photoshop,"DateCreated",v); },
+  hat:      (doc,v) => setSimple(doc,NS.pctx,"Hat",v),
+  location: (doc,v) => { setSimple(doc,NS.pctx,"Location",v); setSimple(doc,NS.Iptc4xmpCore,"Location",v); },
+  people:   (doc,v) => { setSimple(doc,NS.pctx,"People",v); setList(doc,NS.Iptc4xmpExt,"PersonInImage","Bag",splitList(v)); },
+  story:    (doc,v) => { setSimple(doc,NS.pctx,"Story",v); setList(doc,NS.dc,"description","Alt",v?[v]:[]); },
+  angle:    (doc,v) => setSimple(doc,NS.pctx,"Angle",v),
+  quote:    (doc,v) => setSimple(doc,NS.pctx,"Quote",v),
+  keywords: (doc,v) => setList(doc,NS.dc,"subject","Bag",splitList(v)),
+  timing:   (doc,v) => setSimple(doc,NS.pctx,"Use",v),
+};
+const FLAG_TAGS = {name_people:"NamePeople", students:"Students", minors:"Minors", private_guests:"PrivateGuests"};
+const TEXT_FIELDS = Object.keys(FIELD_WRITERS), FLAGS = Object.keys(FLAG_TAGS);
+
+function dataFromXmp(doc){
+  const d = {rights:{}};
+  if(!doc) return {tagged:false, data:d};
+  const g = (ns,l) => readProp(doc,ns,l);
+  const s = v => Array.isArray(v) ? (v[0]||"") : (v||"");
+  const a = v => Array.isArray(v) ? v : (v ? [v] : []);
+  d.event    = s(g(NS.pctx,"Event")) || s(g(NS.dc,"title"));
+  d.date     = (s(g(NS.pctx,"Date")) || s(g(NS.photoshop,"DateCreated"))).slice(0,10).replace(/:/g,"-");
+  d.hat      = s(g(NS.pctx,"Hat"));
+  d.location = s(g(NS.pctx,"Location")) || s(g(NS.Iptc4xmpCore,"Location")) || s(g(NS.photoshop,"City"));
+  d.people   = s(g(NS.pctx,"People")) || a(g(NS.Iptc4xmpExt,"PersonInImage")).join(", ");
+  d.story    = s(g(NS.pctx,"Story")) || s(g(NS.dc,"description"));
+  d.angle    = s(g(NS.pctx,"Angle"));
+  d.quote    = s(g(NS.pctx,"Quote"));
+  d.keywords = a(g(NS.dc,"subject")).join(", ");
+  d.timing   = s(g(NS.pctx,"Use"));
+  for(const k of FLAGS) d.rights[k] = s(g(NS.pctx,FLAG_TAGS[k])) === "True";
+  d.tagged_at = s(g(NS.pctx,"TaggedAt"));
+  return {tagged: !!d.tagged_at, data:d};
+}
+
+// ---------- JPEG ----------
+const XMP_SIG = "http://ns.adobe.com/xap/1.0/\0";
+function hasAscii(u8, off, s){ if(off + s.length > u8.length) return false; for(let i=0;i<s.length;i++) if(u8[off+i] !== s.charCodeAt(i)) return false; return true; }
+function jpegScan(u8){
+  if(u8[0] !== 0xFF || u8[1] !== 0xD8) throw new Error("not a valid JPEG file");
+  const segs = []; let i = 2;
+  while(i + 4 <= u8.length){
+    if(u8[i] !== 0xFF) break;
+    const m = u8[i+1];
+    if(m === 0xFF){ i++; continue; }
+    if(m === 0xDA || m === 0xD9) break;                       // start of image data: metadata ends here
+    if((m >= 0xD0 && m <= 0xD7) || m === 0x01){ i += 2; continue; }
+    const len = (u8[i+2] << 8) | u8[i+3];
+    segs.push({m, start:i, end:i+2+len, data:i+4});
+    i += 2 + len;
+  }
+  return segs;
+}
+const isXmpSeg = (u8,s) => s.m === 0xE1 && hasAscii(u8, s.data, XMP_SIG);
+function jpegReadXmp(u8){
+  const s = jpegScan(u8).find(s => isXmpSeg(u8,s) && s.end <= u8.length);
+  return s ? dec.decode(u8.subarray(s.data + XMP_SIG.length, s.end)) : null;
+}
+function jpegWriteXmp(u8, xmp){
+  const sig = enc.encode(XMP_SIG), payload = enc.encode(xmp), len = 2 + sig.length + payload.length;
+  if(len > 65535) throw new Error("metadata too large for a JPEG XMP block");
+  const seg = new Uint8Array(2 + len);
+  seg[0] = 0xFF; seg[1] = 0xE1; seg[2] = len >> 8; seg[3] = len & 255; seg.set(sig, 4); seg.set(payload, 4 + sig.length);
+  const segs = jpegScan(u8), old = segs.find(s => isXmpSeg(u8,s));
+  let a, b;
+  if(old){ a = old.start; b = old.end; }
+  else { let pos = 2; for(const s of segs){ if(s.m === 0xE0 || s.m === 0xE1) pos = s.end; else break; } a = b = pos; } // after JFIF/EXIF
+  const out = new Uint8Array(u8.length - (b - a) + seg.length);
+  out.set(u8.subarray(0, a), 0); out.set(seg, a); out.set(u8.subarray(b), a + seg.length);
+  return out;
+}
+
+// ---------- PNG ----------
+const PNG_KEY = "XML:com.adobe.xmp";
+const CRC_T = (() => { const t = new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = c&1 ? 0xEDB88320 ^ (c>>>1) : c>>>1; t[n]=c>>>0; } return t; })();
+function crc32(u8){ let c = 0xFFFFFFFF; for(let i=0;i<u8.length;i++) c = CRC_T[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+const u32 = (u8,i) => ((u8[i]<<24)|(u8[i+1]<<16)|(u8[i+2]<<8)|u8[i+3])>>>0;
+function pngChunks(u8){
+  const sig = [137,80,78,71,13,10,26,10];
+  if(!sig.every((b,i) => u8[i] === b)) throw new Error("not a valid PNG file");
+  const out = []; let i = 8;
+  while(i + 12 <= u8.length){
+    const len = u32(u8,i), type = String.fromCharCode(u8[i+4],u8[i+5],u8[i+6],u8[i+7]);
+    out.push({type, start:i, data:i+8, len, end:i+12+len});
+    i += 12 + len;
+    if(type === "IEND") break;
+  }
+  return out;
+}
+const isXmpChunk = (u8,c) => c.type === "iTXt" && hasAscii(u8, c.data, PNG_KEY + "\0");
+function pngReadXmp(u8){
+  const c = pngChunks(u8).find(c => isXmpChunk(u8,c) && c.end <= u8.length);
+  if(!c) return null;
+  let p = c.data + PNG_KEY.length + 1;
+  if(u8[p] !== 0) return null;                    // compressed XMP: not supported for reading
+  p += 2; while(u8[p] !== 0) p++; p++; while(u8[p] !== 0) p++; p++;
+  return dec.decode(u8.subarray(p, c.data + c.len));
+}
+function pngWriteXmp(u8, xmp){
+  const chunks = pngChunks(u8);
+  if(chunks.some(c => isXmpChunk(u8,c) && u8[c.data + PNG_KEY.length + 1] !== 0)) throw new Error("this PNG has compressed metadata the tagger can't merge, so it was left untouched");
+  const body = new Uint8Array([...enc.encode("iTXt" + PNG_KEY), 0, 0, 0, 0, 0, ...enc.encode(xmp)]);
+  const chunk = new Uint8Array(body.length + 8), dv = new DataView(chunk.buffer);
+  dv.setUint32(0, body.length - 4); chunk.set(body, 4); dv.setUint32(4 + body.length, crc32(body));
+  const old = chunks.find(c => isXmpChunk(u8,c));
+  let a, b;
+  if(old){ a = old.start; b = old.end; }
+  else { const idat = chunks.find(c => c.type === "IDAT"); if(!idat) throw new Error("PNG has no image data"); a = b = idat.start; }
+  const out = new Uint8Array(u8.length - (b - a) + chunk.length);
+  out.set(u8.subarray(0, a), 0); out.set(chunk, a); out.set(u8.subarray(b), a + chunk.length);
+  return out;
+}
+
+// ======================================================================
+//  App
+// ======================================================================
+const IMG_RE = /\.(jpe?g|png|heic|heif|tiff?|webp|dng|cr2|cr3|nef|arw)$/i;
+const kindOf = n => /\.jpe?g$/i.test(n) ? "jpeg" : /\.png$/i.test(n) ? "png" : "sidecar";
+const baseName = n => n.replace(/\.[^.]+$/, "");
+let roots = [], loose = [], items = [], visible = [], sel = new Set(), anchor = null, dirty = new Set(), scanGen = 0;
+const $ = id => document.getElementById(id);
+function toast(msg, ms=2000){ const t=$("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove("show"),ms); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function needChrome(){ alert("This tool needs Google Chrome (or Edge). Open photo-tagger.html in Chrome."); }
+
+async function openDir(){
+  if(!window.showDirectoryPicker) return needChrome();
+  let d; try{ d = await window.showDirectoryPicker({id:"photo-tagger-dir", mode:"readwrite"}); }catch(e){ return; }
+  roots = [d]; loose = []; await scan();
+}
+async function openFiles(){
+  if(!window.showOpenFilePicker) return needChrome();
+  let hs; try{
+    hs = await window.showOpenFilePicker({id:"photo-tagger-files", multiple:true,
+      types:[{description:"Photos", accept:{"image/*":[".jpg",".jpeg",".png",".heic",".heif",".tif",".tiff",".webp",".dng"]}}]});
+  }catch(e){ return; }
+  roots = []; loose = hs.filter(h => IMG_RE.test(h.name)); await scan();
+}
+async function scan(){
+  const gen = ++scanGen;
+  items = []; sel.clear(); anchor = null;
+  $("welcome").hidden = true;
+  ["rescanBtn","filter","folderFilter"].forEach(id => $(id).disabled = false);
+  $("stat").textContent = "Scanning…";
+  for(const r of roots) await walk(r, roots.length > 1 ? r.name + "/" : "", 0, r);
+  for(const h of loose) items.push(newItem(h, "selected photos", h.name, null, null, null));
+  items.forEach((it,i) => it.idx = i);
+  buildFolderFilter(); render(); loadForm();
+  // read existing metadata in the background
+  for(const it of items){ if(gen !== scanGen) return; await ensureMeta(it); updateTile(it); updateStat(); }
+  buildDatalists();
+  if($("filter").value !== "all") render();
+}
+function newItem(handle, folder, path, dir, root, sidecar){
+  return {name:handle.name, handle, folder, path, dir, root, sidecar, kind:kindOf(handle.name),
+          data:{rights:{}}, tagged:false, metaP:null, url:null, exif:undefined, orient:null};
+}
+async function walk(dir, prefix, depth, root){
+  const files = [], sidecars = new Map(), subdirs = [];
+  for await (const [name, h] of dir.entries()){
+    if(name.startsWith(".")) continue;
+    if(h.kind === "directory"){ if(depth < 4) subdirs.push([name, h]); }
+    else if(/\.xmp$/i.test(name)) sidecars.set(baseName(name).toLowerCase(), h);
+    else if(IMG_RE.test(name)) files.push([name, h]);
+  }
+  files.sort((a,b) => a[0].localeCompare(b[0]));
+  const folder = prefix ? prefix.replace(/\/$/, "") : dir.name;
+  for(const [name, h] of files) items.push(newItem(h, folder, prefix + name, dir, root, sidecars.get(baseName(name).toLowerCase()) || null));
+  for(const [n, h] of subdirs.sort((a,b) => a[0].localeCompare(b[0]))) await walk(h, prefix + n + "/", depth + 1, root);
+}
+function ensureMeta(it){
+  if(!it.metaP) it.metaP = (async () => {
+    try{
+      let x = null;
+      if(it.kind !== "sidecar"){
+        const f = await it.handle.getFile();
+        const head = new Uint8Array(await f.slice(0, Math.min(f.size, 1 << 20)).arrayBuffer());
+        x = it.kind === "jpeg" ? jpegReadXmp(head) : pngReadXmp(head);
+      }
+      if(!x && it.sidecar) x = await (await it.sidecar.getFile()).text();
+      const r = dataFromXmp(parseXmp(x));
+      it.data = r.data; it.tagged = r.tagged;
+    }catch(e){ it.readErr = e.message; }
+  })();
+  return it.metaP;
+}
+function buildFolderFilter(){
+  const ff = $("folderFilter"), cur = ff.value;
+  const folders = [...new Set(items.map(i => i.folder))].sort();
+  ff.innerHTML = '<option value="">All folders</option>' + folders.map(f => `<option>${esc(f)}</option>`).join("");
+  ff.value = folders.includes(cur) ? cur : "";
+}
+function buildDatalists(){
+  const fill = (id, key) => { $(id).innerHTML = [...new Set(items.map(i => i.data && i.data[key]).filter(Boolean))].sort().map(v => `<option value="${esc(v)}">`).join(""); };
+  fill("dl_event","event"); fill("dl_location","location"); fill("dl_people","people");
+}
+
+// ---------- previews ----------
+let heicChain = Promise.resolve();
+function loadUrl(it){
+  if(it.url) return Promise.resolve(it.url);
+  if(it._p) return it._p;
+  it._p = (async () => {
+    const file = await it.handle.getFile();
+    const native = URL.createObjectURL(file);
+    const ok = await new Promise(res => { const im = new Image(); im.onload = () => { setOrient(it, im); res(true); }; im.onerror = () => res(false); im.src = native; });
+    if(ok){ it.url = native; return native; }
+    URL.revokeObjectURL(native);
+    if(/\.hei[cf]$/i.test(it.name) && window.heic2any){
+      const url = await (heicChain = heicChain.then(async () => {
+        try{ const out = await heic2any({blob:file, toType:"image/jpeg", quality:0.6}); return URL.createObjectURL(Array.isArray(out) ? out[0] : out); }
+        catch(e){ return null; }
+      }));
+      if(url){ it.url = url; const im = new Image(); im.onload = () => setOrient(it, im); im.src = url; return url; }
+    }
+    return null;
+  })();
+  return it._p;
+}
+function setOrient(it, im){ const w = im.naturalWidth, h = im.naturalHeight; it.orient = w >= h*1.05 ? "landscape" : h >= w*1.05 ? "portrait" : "square"; }
+async function loadExif(it){
+  if(it.exif !== undefined) return it.exif;
+  it.exif = null;
+  if(!window.exifr) return null;
+  try{
+    const x = await exifr.parse(await it.handle.getFile(), {tiff:true, exif:true, gps:true});
+    if(x){
+      const dt = x.DateTimeOriginal || x.CreateDate;
+      it.exif = { datetime: dt instanceof Date ? localIso(dt) : null,
+                  lat: typeof x.latitude === "number" ? +x.latitude.toFixed(5) : null,
+                  lon: typeof x.longitude === "number" ? +x.longitude.toFixed(5) : null };
+    }
+  }catch(e){}
+  return it.exif;
+}
+function localIso(d){ const p = n => String(n).padStart(2,"0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; }
+const io = new IntersectionObserver(entries => {
+  for(const e of entries){
+    if(!e.isIntersecting) continue;
+    io.unobserve(e.target);
+    const it = items[+e.target.dataset.idx];
+    if(!it) continue;
+    loadUrl(it).then(url => {
+      const ph = e.target.querySelector(".ph");
+      if(url) ph.innerHTML = `<img src="${url}" alt="">`;
+      else ph.textContent = "No preview (" + it.name.split(".").pop().toUpperCase() + ")";
+    });
+  }
+}, {root:$("gridWrap"), rootMargin:"300px"});
+
+// ---------- grid ----------
+function render(){
+  const f = $("filter").value, ff = $("folderFilter").value;
+  visible = items.filter(it => (f === "all" || (f === "tagged") === it.tagged) && (!ff || it.folder === ff));
+  const g = $("grid"); g.innerHTML = "";
+  for(const it of visible){
+    const d = document.createElement("div");
+    d.className = "tile"; d.dataset.idx = it.idx;
+    d.innerHTML = `<div class="ph">${it.url ? `<img src="${it.url}" alt="">` : "…"}</div><div class="ev" hidden></div><div class="dot"></div><div class="cap">${esc(it.name)} <small>${esc(it.folder)}</small></div>`;
+    d.addEventListener("click", ev => clickTile(ev, it.idx));
+    g.appendChild(d); it.tile = d; updateTile(it);
+    if(!it.url) io.observe(d);
+  }
+  updateStat();
+}
+function updateTile(it){
+  const d = it.tile; if(!d || !d.isConnected) return;
+  d.classList.toggle("tagged", it.tagged); d.classList.toggle("sel", sel.has(it.idx));
+  const ev = d.querySelector(".ev"); ev.hidden = !it.data.event; ev.textContent = it.data.event || "";
+  d.querySelector(".dot").title = it.tagged ? "Tagged" : "Not tagged";
+}
+function updateStat(){
+  const tagged = items.filter(i => i.tagged).length;
+  $("stat").textContent = `${tagged} of ${items.length} tagged · showing ${visible.length}` + (sel.size > 1 ? ` · ${sel.size} selected` : "");
+}
+function clickTile(ev, idx){
+  if(ev.shiftKey && anchor !== null){
+    const order = visible.map(i => i.idx), a = order.indexOf(anchor), b = order.indexOf(idx);
+    if(a > -1 && b > -1){ if(!(ev.metaKey || ev.ctrlKey)) sel.clear(); order.slice(Math.min(a,b), Math.max(a,b)+1).forEach(i => sel.add(i)); }
+  } else if(ev.metaKey || ev.ctrlKey){ sel.has(idx) ? sel.delete(idx) : sel.add(idx); anchor = idx; }
+  else { sel.clear(); sel.add(idx); anchor = idx; }
+  refreshSel(); loadForm();
+}
+function refreshSel(){ items.forEach(updateTile); updateStat(); }
+
+// ---------- form ----------
+const fieldVal = (d,k) => d && d[k] != null ? String(d[k]) : "";
+TEXT_FIELDS.forEach(k => { const el = $("f_"+k); el.dataset.ph = el.placeholder || ""; });
+
+async function loadForm(){
+  dirty.clear();
+  const its = [...sel].map(i => items[i]);
+  $("empty").hidden = its.length > 0; $("editor").hidden = !its.length; $("bar").hidden = !its.length;
+  if(!its.length) return;
+  const selKey = [...sel].join(",");
+  await Promise.all(its.map(ensureMeta));
+  if([...sel].join(",") !== selKey) return;
+  const multi = its.length > 1;
+  for(const k of TEXT_FIELDS){
+    const el = $("f_"+k), vals = its.map(it => fieldVal(it.data,k)), same = vals.every(v => v === vals[0]);
+    el.value = same ? vals[0] : "";
+    if(el.tagName !== "SELECT") el.placeholder = same ? el.dataset.ph : "(mixed: leave blank to keep each photo's own)";
+  }
+  for(const k of FLAGS){
+    const el = $("r_"+k), vals = its.map(it => !!it.data.rights[k]), same = vals.every(v => v === vals[0]);
+    el.checked = same && vals[0]; el.indeterminate = !same;
+  }
+  const bn = $("batchNote"); bn.hidden = !multi;
+  if(multi) bn.innerHTML = `<b>Editing ${its.length} photos.</b> Only fields you change are written to all of them; everything else stays as each photo has it.`;
+  const pv = $("preview"), meta = $("meta");
+  if(multi){
+    pv.innerHTML = `<div class="multi">${its.slice(0,8).map(it => `<img data-i="${it.idx}" alt="">`).join("")}</div>`;
+    its.slice(0,8).forEach(it => loadUrl(it).then(u => { const im = pv.querySelector(`img[data-i="${it.idx}"]`); if(im && u) im.src = u; }));
+    const sc = its.filter(i => i.kind === "sidecar").length;
+    meta.textContent = (its.length > 8 ? `+ ${its.length-8} more. ` : "") + (sc ? `${sc} of these save to .xmp sidecar files.` : "");
+  } else {
+    const it = its[0];
+    pv.innerHTML = `<img alt="">`;
+    loadUrl(it).then(u => { if(sel.size === 1 && sel.has(it.idx) && u) pv.querySelector("img").src = u; });
+    const where = it.kind === "sidecar" ? `saves to ${esc(baseName(it.name))}.xmp beside the photo` : "saves into the photo file";
+    meta.innerHTML = `${esc(it.path)} · ${where}`;
+    const x = await loadExif(it);
+    if(!(sel.size === 1 && sel.has(it.idx))) return;
+    const bits = [esc(it.path)];
+    if(it.orient) bits.push(it.orient);
+    if(x && x.datetime) bits.push("taken " + esc(x.datetime.replace("T"," ")));
+    if(x && x.lat != null) bits.push(`<a href="https://www.google.com/maps?q=${x.lat},${x.lon}" target="_blank" rel="noopener">GPS ${x.lat}, ${x.lon}</a>`);
+    if(it.data.tagged_at) bits.push("tagged " + esc(it.data.tagged_at.slice(0,10)));
+    bits.push(`<b>${where}</b>`);
+    if(it.readErr) bits.push(`<span style="color:#b00">${esc(it.readErr)}</span>`);
+    meta.innerHTML = bits.join(" · ");
+    if(!$("f_date").value && x && x.datetime){ $("f_date").value = x.datetime.slice(0,10); dirty.add("date"); }
+  }
+}
+TEXT_FIELDS.forEach(k => { $("f_"+k).addEventListener("input", () => dirty.add(k)); $("f_"+k).addEventListener("change", () => dirty.add(k)); });
+FLAGS.forEach(k => $("r_"+k).addEventListener("change", () => { dirty.add("r:"+k); $("r_"+k).indeterminate = false; }));
+
+async function ensureWrite(h){
+  if(!h.queryPermission) return;
+  if(await h.queryPermission({mode:"readwrite"}) === "granted") return;
+  if(await h.requestPermission({mode:"readwrite"}) !== "granted") throw new Error("permission to change files was not given");
+}
+// HEIC etc. picked as single files: ask once for the folder they're in so the .xmp can sit beside them
+async function folderForLoose(list){
+  if(!list.length) return;
+  toast(`Choose the folder that contains ${list[0].name} so its .xmp can be saved beside it`, 5000);
+  let d; try{ d = await window.showDirectoryPicker({id:"photo-tagger-sidecar", mode:"readwrite", startIn:list[0].handle}); }catch(e){ return; }
+  for(const it of list){
+    const path = await d.resolve(it.handle);
+    if(!path) continue;
+    let cur = d; for(const p of path.slice(0,-1)) cur = await cur.getDirectoryHandle(p);
+    it.dir = cur; it.root = d;
+  }
+}
+
+let saving = false;
+async function save(andNext){
+  if(saving) return;
+  const its = [...sel].map(i => items[i]);
+  if(!its.length) return;
+  saving = true; $("saveBtn").disabled = $("saveNextBtn").disabled = true;
+  const multi = its.length > 1, errors = [];
+  const vals = {}; TEXT_FIELDS.forEach(k => vals[k] = $("f_"+k).value.trim());
+  const flags = {}; FLAGS.forEach(k => flags[k] = {checked:$("r_"+k).checked, ind:$("r_"+k).indeterminate});
+  const writeK = k => !multi || dirty.has(k), writeF = k => multi ? dirty.has("r:"+k) : !flags[k].ind;
+  const apply = doc => {
+    for(const k of TEXT_FIELDS) if(writeK(k)) FIELD_WRITERS[k](doc, vals[k]);
+    for(const k of FLAGS) if(writeF(k)) setSimple(doc, NS.pctx, FLAG_TAGS[k], flags[k].checked ? "True" : "False");
+    setSimple(doc, NS.pctx, "TaggedAt", new Date().toISOString());
+    setSimple(doc, NS.pctx, "Tool", "photo-tagger");
+    setSimple(doc, NS.xmp, "MetadataDate", new Date().toISOString());
+  };
+  try{
+    // permissions first, while the click still counts as a user gesture
+    const asked = new Set();
+    for(const it of its){ const h = it.root || it.handle; if(!asked.has(h)){ asked.add(h); await ensureWrite(h); } }
+    await folderForLoose(its.filter(it => it.kind === "sidecar" && !it.dir));
+  }catch(e){ errors.push(e.message); }
+  let n = 0;
+  if(!errors.length) for(const it of its){
+    try{
+      if(it.kind === "sidecar"){
+        if(!it.dir) throw new Error("no folder chosen for its .xmp file");
+        const name = baseName(it.name) + ".xmp";
+        let cur = null; try{ cur = await (await (await it.dir.getFileHandle(name)).getFile()).text(); }catch(e){}
+        const doc = parseXmp(cur) || emptyXmp(); apply(doc);
+        const h = await it.dir.getFileHandle(name, {create:true});
+        const w = await h.createWritable(); await w.write(serializeXmp(doc)); await w.close();
+        it.sidecar = h;
+      } else {
+        const u8 = new Uint8Array(await (await it.handle.getFile()).arrayBuffer());
+        const doc = parseXmp(it.kind === "jpeg" ? jpegReadXmp(u8) : pngReadXmp(u8)) || emptyXmp(); apply(doc);
+        let out;
+        try{ out = it.kind === "jpeg" ? jpegWriteXmp(u8, serializeXmp(doc)) : pngWriteXmp(u8, serializeXmp(doc)); }
+        catch(e){ if(it.kind !== "jpeg") throw e; out = jpegWriteXmp(u8, serializeXmp(doc, 0)); }
+        const w = await it.handle.createWritable(); await w.write(out); await w.close();
+      }
+      it.metaP = null; it.readErr = null; await ensureMeta(it); n++;
+    }catch(e){ console.error(e); errors.push(`${it.name}: ${e.message}`); }
+    updateTile(it);
+  }
+  saving = false; $("saveBtn").disabled = $("saveNextBtn").disabled = false;
+  dirty.clear(); buildDatalists(); updateStat();
+  if(errors.length) alert(`Saved ${n} of ${its.length}.\n\n` + errors.join("\n"));
+  else toast(`Saved ${n} photo${n === 1 ? "" : "s"}`);
+  if(andNext && !errors.length){
+    const order = visible.map(i => i.idx), pos = order.indexOf(its[its.length-1].idx);
+    const rest = order.slice(pos+1).concat(order.slice(0, pos));
+    const nxt = rest.find(i => !items[i].tagged && !sel.has(i)) ?? order[pos+1];
+    if($("filter").value !== "all") render();
+    if(nxt !== undefined){ sel.clear(); sel.add(nxt); anchor = nxt; refreshSel(); loadForm(); scrollToSel(); }
+    else { sel.clear(); refreshSel(); loadForm(); toast("Everything here is tagged"); }
+  }
+}
+function scrollToSel(){ const t = document.querySelector(".tile.sel"); if(t) t.scrollIntoView({block:"nearest"}); }
+function move(step){
+  if(!visible.length) return;
+  const order = visible.map(i => i.idx);
+  let pos = anchor !== null ? order.indexOf(anchor) : -1;
+  pos = Math.max(0, Math.min(order.length-1, pos + step));
+  sel.clear(); sel.add(order[pos]); anchor = order[pos]; refreshSel(); loadForm(); scrollToSel();
+}
+
+// ---------- drag & drop from Finder (adds to what's open) ----------
+const gw = $("gridWrap");
+document.addEventListener("dragover", e => { e.preventDefault(); gw.classList.add("drag"); });
+document.addEventListener("dragleave", e => { if(!e.relatedTarget) gw.classList.remove("drag"); });
+document.addEventListener("drop", async e => {
+  e.preventDefault(); gw.classList.remove("drag");
+  const ps = [...e.dataTransfer.items].filter(i => i.kind === "file" && i.getAsFileSystemHandle).map(i => i.getAsFileSystemHandle());
+  if(!ps.length) return needChrome();
+  for(const h of await Promise.all(ps)){
+    if(!h) continue;
+    if(h.kind === "directory") roots.push(h); else if(IMG_RE.test(h.name)) loose.push(h);
+  }
+  await scan();
+});
+
+$("openDirBtn").onclick = openDir;
+$("openFilesBtn").onclick = openFiles;
+$("rescanBtn").onclick = scan;
+$("filter").onchange = render;
+$("folderFilter").onchange = render;
+$("saveBtn").onclick = () => save(false);
+$("saveNextBtn").onclick = () => save(true);
+document.addEventListener("keydown", e => {
+  if((e.metaKey || e.ctrlKey) && e.key === "Enter"){ e.preventDefault(); save(true); return; }
+  if(/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) return;
+  if(e.key === "ArrowRight"){ e.preventDefault(); move(1); }
+  if(e.key === "ArrowLeft"){ e.preventDefault(); move(-1); }
+  if((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a" && visible.length){ e.preventDefault(); visible.forEach(i => sel.add(i.idx)); refreshSel(); loadForm(); }
+});
+window.addEventListener("beforeunload", e => { if(dirty.size && sel.size){ e.preventDefault(); e.returnValue = ""; } });
+</script>
+</body>
+</html>
