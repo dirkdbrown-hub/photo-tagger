@@ -83,7 +83,7 @@
       <h2>Tag any photo with context</h2>
       <p><b>Open photos…</b> to pick individual photos, <b>Open folder…</b> to work through a whole folder, or drag photos or folders from Finder onto this window.</p>
       <ul>
-        <li><b>JPEG and PNG:</b> the context is written <i>into the photo file</i> as standard XMP metadata (title, caption, keywords, people, location), so it travels with the photo.</li>
+        <li><b>JPEG and PNG:</b> the context is written <i>into the photo file</i> as standard XMP metadata (title, caption, keywords, people, location), so it travels with the photo. JPEGs also get every field as one readable summary in their comment fields (EXIF User Comment, Windows Comments, JPEG comment) plus the IPTC caption and keywords that Preview and Photos read.</li>
         <li><b>HEIC, TIFF, WebP, RAW:</b> a browser can't safely rewrite these, so the context goes in a standard <code>.xmp</code> file with the same name next to the photo (e.g. <code>IMG_1234.xmp</code>), the convention Lightroom and exiftool use.</li>
       </ul>
       <p>Select one photo, or <b>⌘-click / shift-click</b> a batch, fill in what you know, and press <b>Save</b> (<b>⌘↩</b> saves and moves on). Chrome will ask before it lets this page change files.</p>
@@ -166,6 +166,7 @@ const NS = {
   photoshop:"http://ns.adobe.com/photoshop/1.0/",
   Iptc4xmpCore:"http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/",
   Iptc4xmpExt:"http://iptc.org/std/Iptc4xmpExt/2008-02-29/",
+  exif:"http://ns.adobe.com/exif/1.0/",
   pctx:"http://ns.praxis-celeris.com/photo-context/1.0/"
 };
 const XMLNS = "http://www.w3.org/2000/xmlns/", XMLNS_XML = "http://www.w3.org/XML/1998/namespace";
@@ -319,6 +320,170 @@ function jpegWriteXmp(u8, xmp){
   const out = new Uint8Array(u8.length - (b - a) + seg.length);
   out.set(u8.subarray(0, a), 0); out.set(seg, a); out.set(u8.subarray(b), a + seg.length);
   return out;
+}
+
+// ---------- JPEG: readable comment summary (COM, EXIF UserComment + XPComment, IPTC-IIM) ----------
+const COM_MARK = "Photo context (photo-tagger)";
+const HAT_LABEL = {proof:"PROOF (Chairman)", mcnair:"McNair / USC", innovation:"Broader innovation", dirk:"Personal / Dirk"};
+const USE_LABEL = {soon:"Use soon (timely)", evergreen:"Evergreen", hold:"Hold: don't use yet", never:"Never post"};
+function summaryText(d){
+  const L = [COM_MARK], add = (k,v) => { if(v) L.push(k + ": " + v); }, r = d.rights || {};
+  add("Event", d.event); add("Date", d.date); add("Location", d.location); add("People", d.people);
+  add("Caption", d.story); add("Post angle", d.angle); add("Quote", d.quote); add("Keywords", d.keywords);
+  add("Hat", HAT_LABEL[d.hat] || d.hat); add("Use", USE_LABEL[d.timing] || d.timing);
+  L.push("Rights: " + [["OK to name people",r.name_people],["Students",r.students],["Minors",r.minors],["Private guests",r.private_guests]]
+    .map(([k,v]) => k + " " + (v ? "yes" : "no")).join(", "));
+  return L.join("\n");
+}
+function concatBytes(...parts){ let n=0; parts.forEach(p=>n+=p.length); const o=new Uint8Array(n); let i=0; parts.forEach(p=>{o.set(p,i); i+=p.length;}); return o; }
+function splice(u8, a, b, ins){ return concatBytes(u8.subarray(0,a), ins, u8.subarray(b)); }
+function makeSeg(marker, payload){
+  const len = payload.length + 2;
+  if(len > 65535) throw new Error("block too large");
+  return concatBytes(new Uint8Array([0xFF, marker, len >> 8, len & 255]), payload);
+}
+function afterAppSegs(segs){ let pos = 2; for(const s of segs){ if(s.m >= 0xE0 && s.m <= 0xEF) pos = s.end; else break; } return pos; }
+function utf8Trunc(s, max){ const b = enc.encode(s || ""); if(b.length <= max) return b; let n = max; while(n > 0 && (b[n] & 0xC0) === 0x80) n--; return b.subarray(0, n); }
+
+// JPEG COM segment
+function jpegWriteCom(u8, text){
+  let segs = jpegScan(u8);
+  for(const s of segs.filter(s => s.m === 0xFE && hasAscii(u8, s.data, COM_MARK)).reverse()) u8 = splice(u8, s.start, s.end, new Uint8Array(0));
+  segs = jpegScan(u8);
+  const pos = afterAppSegs(segs);
+  return splice(u8, pos, pos, makeSeg(0xFE, utf8Trunc(text, 65000)));
+}
+
+// IPTC-IIM inside APP13 "Photoshop 3.0" (resource 0x0404)
+const PS_SIG = "Photoshop 3.0\0";
+function parseIim(u8){
+  const out = []; let i = 0;
+  while(i + 5 <= u8.length && u8[i] === 0x1C){
+    let len = (u8[i+3] << 8) | u8[i+4], hdr = 5;
+    if(len & 0x8000){ const n = len & 0x7FFF; len = 0; for(let k=0;k<n;k++) len = len*256 + u8[i+5+k]; hdr = 5 + n; }
+    out.push({rec:u8[i+1], ds:u8[i+2], raw:u8.subarray(i, i+hdr+len)}); i += hdr + len;
+  }
+  return out;
+}
+const iimRec = (rec, ds, bytes) => ({rec, ds, raw:concatBytes(new Uint8Array([0x1C, rec, ds, bytes.length >> 8, bytes.length & 255]), bytes)});
+function parseIrb(u8, off, end){
+  const res = []; let i = off;
+  while(i + 12 <= end && hasAscii(u8, i, "8BIM")){
+    const id = (u8[i+4] << 8) | u8[i+5], nl = u8[i+6];
+    let p = i + 7 + nl; if((nl + 1) % 2) p++;
+    const size = u32(u8, p); p += 4;
+    if(p + size > end) break;
+    const e = p + size + (size % 2);
+    res.push({id, raw:u8.subarray(i, Math.min(e, end)), data:u8.subarray(p, p + size)}); i = e;
+  }
+  return {res, tail:u8.subarray(Math.min(i, end), end)};
+}
+function irbRes(id, data){
+  const h = new Uint8Array(12); h.set(enc.encode("8BIM"), 0); h[4] = id >> 8; h[5] = id & 255; h[6] = 0; h[7] = 0;
+  new DataView(h.buffer).setUint32(8, data.length);
+  return concatBytes(h, data, new Uint8Array(data.length % 2));
+}
+function jpegWriteIptc(u8, d){
+  const segs = jpegScan(u8), app13 = segs.filter(s => s.m === 0xED && hasAscii(u8, s.data, PS_SIG));
+  if(app13.length > 1) throw new Error("multi-part Photoshop block");
+  let kept = [], oldIim = [];
+  if(app13.length){
+    const s = app13[0], irb = parseIrb(u8, s.data + PS_SIG.length, s.end);
+    for(const r of irb.res){ if(r.id === 0x0404) oldIim = parseIim(r.data); else if(r.id !== 0x0425) kept.push(r.raw); } // 0x0425 = stale IPTC digest
+    if(irb.tail.length) kept.push(irb.tail);
+  }
+  const MANAGED = new Set(["1:90","2:5","2:25","2:92","2:120"]);
+  const others = oldIim.filter(r => !MANAGED.has(r.rec + ":" + r.ds));
+  const ours = [iimRec(1, 90, new Uint8Array([0x1B, 0x25, 0x47]))];                       // UTF-8
+  if(!others.some(r => r.rec === 2 && r.ds === 0)) ours.push(iimRec(2, 0, new Uint8Array([0, 4])));
+  if(d.event) ours.push(iimRec(2, 5, utf8Trunc(d.event, 64)));
+  splitList(d.keywords).forEach(k => ours.push(iimRec(2, 25, utf8Trunc(k, 64))));
+  if(d.location) ours.push(iimRec(2, 92, utf8Trunc(d.location, 32)));
+  if(d.story) ours.push(iimRec(2, 120, utf8Trunc(d.story, 2000)));
+  const all = others.concat(ours).map((r,i) => ({...r, i})).sort((a,b) => a.rec - b.rec || a.ds - b.ds || a.i - b.i);
+  const iim = concatBytes(...all.map(r => r.raw));
+  const seg = makeSeg(0xED, concatBytes(enc.encode(PS_SIG), ...kept, irbRes(0x0404, iim)));
+  if(app13.length) return splice(u8, app13[0].start, app13[0].end, seg);
+  const pos = afterAppSegs(segs);
+  return splice(u8, pos, pos, seg);
+}
+
+// EXIF UserComment (ExifIFD 0x9286) and XPComment (IFD0 0x9C9C, shown by Windows as "Comments").
+// Rewritten IFDs are appended to the end of the EXIF block and re-pointed, so existing data
+// (maker notes, thumbnail) never moves. Our appended area starts with a marker so the next save
+// can drop the previous copy instead of growing the file.
+const EXIF_SIG = "Exif\0\0", TAG_AREA = "PCTXAREA";
+const TSIZE = {1:1,2:1,3:2,4:4,5:8,6:1,7:1,8:2,9:4,10:8,11:4,12:8,13:4};
+function tiffSetComments(t, text){
+  const le = t[0] === 0x49;
+  if(!(le || t[0] === 0x4D)) throw new Error("unreadable EXIF header");
+  let buf = t;
+  const r16 = (a,o) => le ? a[o] | (a[o+1] << 8) : (a[o] << 8) | a[o+1];
+  const r32 = (a,o) => (le ? (a[o] | (a[o+1] << 8) | (a[o+2] << 16) | (a[o+3] << 24)) : ((a[o] << 24) | (a[o+1] << 16) | (a[o+2] << 8) | a[o+3])) >>> 0;
+  const w16 = (a,o,v) => { if(le){ a[o]=v&255; a[o+1]=(v>>8)&255; } else { a[o]=(v>>8)&255; a[o+1]=v&255; } };
+  const w32 = (a,o,v) => { for(let k=0;k<4;k++) a[o + (le ? k : 3-k)] = (v >>> (8*k)) & 255; };
+  const readIfd = off => {
+    if(off + 2 > buf.length) throw new Error("bad EXIF directory");
+    const n = r16(buf, off);
+    if(off + 2 + n*12 + 4 > buf.length) throw new Error("bad EXIF directory");
+    const e = []; for(let i=0;i<n;i++){ const p = off + 2 + i*12; e.push({tag:r16(buf,p), type:r16(buf,p+2), count:r32(buf,p+4), raw:buf.slice(p, p+12)}); }
+    return {entries:e, next:r32(buf, off + 2 + n*12)};
+  };
+  const ifd0 = readIfd(r32(buf, 4));
+  const exifPtr = ifd0.entries.find(e => e.tag === 0x8769);
+  const exif = exifPtr ? readIfd(r32(exifPtr.raw, 8)) : {entries:[{tag:0x9000, type:7, count:4, raw:null, inline:enc.encode("0230")}], next:0};
+  const keep0 = ifd0.entries.filter(e => e.tag !== 0x8769 && e.tag !== 0x9C9C);
+  const keepE = exif.entries.filter(e => e.tag !== 0x9286);
+  // drop our previous appended area if nothing we keep points into it
+  const mk = enc.encode(TAG_AREA);
+  let cut = -1;
+  for(let p = buf.length - mk.length; p >= 8; p--){ if(hasAscii(buf, p, TAG_AREA)){ cut = p; break; } }
+  if(cut > 0){
+    const refs = [ifd0.next, exif.next];
+    for(const e of keep0.concat(keepE)){
+      if(!e.raw) continue;
+      const v = r32(e.raw, 8), size = (TSIZE[e.type] || 1) * e.count;
+      if(size > 4 || e.type === 4 || e.type === 9 || e.type === 13) refs.push(v);
+    }
+    if(refs.every(v => v < cut)) buf = buf.subarray(0, cut);
+  }
+  const chunks = []; let cursor = buf.length;
+  const alloc = bytes => { if(cursor % 2){ chunks.push(new Uint8Array(1)); cursor++; } const off = cursor; chunks.push(bytes); cursor += bytes.length; return off; };
+  alloc(mk);
+  const entry = (tag, type, count, val) => {
+    const r = new Uint8Array(12); w16(r,0,tag); w16(r,2,type); w32(r,4,count);
+    if(val.length <= 4) r.set(val, 8); else w32(r, 8, alloc(val));
+    return {tag, raw:r};
+  };
+  const writeIfd = (entries, next) => {
+    entries.sort((a,b) => a.tag - b.tag);
+    const b = new Uint8Array(2 + entries.length*12 + 4); w16(b, 0, entries.length);
+    entries.forEach((e,i) => b.set(e.raw, 2 + i*12)); w32(b, 2 + entries.length*12, next);
+    return alloc(b);
+  };
+  const ascii = /^[\x00-\x7F]*$/.test(text);
+  let uc;
+  if(ascii) uc = concatBytes(enc.encode("ASCII\0\0\0"), enc.encode(text));
+  else { uc = new Uint8Array(8 + text.length*2); uc.set(enc.encode("UNICODE\0"), 0); for(let i=0;i<text.length;i++) w16(uc, 8 + i*2, text.charCodeAt(i)); }
+  const xp = new Uint8Array(text.length*2 + 2); for(let i=0;i<text.length;i++){ const c = text.charCodeAt(i); xp[i*2] = c & 255; xp[i*2+1] = c >> 8; }
+  const eEntries = keepE.map(e => e.raw ? {tag:e.tag, raw:e.raw} : entry(e.tag, e.type, e.count, e.inline));
+  eEntries.push(entry(0x9286, 7, uc.length, uc));
+  const exifOff = writeIfd(eEntries, exif.next);
+  const ptr = new Uint8Array(4); w32(ptr, 0, exifOff);
+  const zEntries = keep0.map(e => ({tag:e.tag, raw:e.raw}));
+  zEntries.push(entry(0x8769, 4, 1, ptr), entry(0x9C9C, 1, xp.length, xp));
+  const ifd0Off = writeIfd(zEntries, ifd0.next);
+  const out = concatBytes(buf, ...chunks);
+  w32(out, 4, ifd0Off);
+  return out;
+}
+function jpegWriteExifComment(u8, text){
+  const segs = jpegScan(u8), s = segs.find(s => s.m === 0xE1 && hasAscii(u8, s.data, EXIF_SIG));
+  const tiff = s ? u8.subarray(s.data + 6, s.end) : new Uint8Array([0x4D,0x4D,0,42,0,0,0,8, 0,0, 0,0,0,0]);
+  const seg = makeSeg(0xE1, concatBytes(enc.encode(EXIF_SIG), tiffSetComments(tiff, text)));
+  if(s) return splice(u8, s.start, s.end, seg);
+  const pos = segs[0] && segs[0].m === 0xE0 ? segs[0].end : 2;
+  return splice(u8, pos, pos, seg);
 }
 
 // ---------- PNG ----------
@@ -620,7 +785,11 @@ async function save(andNext){
     setSimple(doc, NS.pctx, "TaggedAt", new Date().toISOString());
     setSimple(doc, NS.pctx, "Tool", "photo-tagger");
     setSimple(doc, NS.xmp, "MetadataDate", new Date().toISOString());
+    const summary = summaryText(dataFromXmp(doc).data);
+    setList(doc, NS.exif, "UserComment", "Alt", [summary]);
+    return summary;
   };
+  const warnings = [];
   try{
     // permissions first, while the click still counts as a user gesture
     const asked = new Set();
@@ -640,10 +809,18 @@ async function save(andNext){
         it.sidecar = h;
       } else {
         const u8 = new Uint8Array(await (await it.handle.getFile()).arrayBuffer());
-        const doc = parseXmp(it.kind === "jpeg" ? jpegReadXmp(u8) : pngReadXmp(u8)) || emptyXmp(); apply(doc);
+        const doc = parseXmp(it.kind === "jpeg" ? jpegReadXmp(u8) : pngReadXmp(u8)) || emptyXmp();
+        const summary = apply(doc), data = dataFromXmp(doc).data;
         let out;
         try{ out = it.kind === "jpeg" ? jpegWriteXmp(u8, serializeXmp(doc)) : pngWriteXmp(u8, serializeXmp(doc)); }
         catch(e){ if(it.kind !== "jpeg") throw e; out = jpegWriteXmp(u8, serializeXmp(doc, 0)); }
+        if(it.kind === "jpeg"){
+          // readable copies for Preview, Photos, Windows and other viewers; a failure here keeps the XMP save
+          try{ out = jpegWriteIptc(out, data); }            catch(e){ warnings.push(`${it.name}: IPTC caption not written (${e.message})`); }
+          try{ out = jpegWriteExifComment(out, summary); }  catch(e){ warnings.push(`${it.name}: EXIF comment not written (${e.message})`); }
+          try{ out = jpegWriteCom(out, summary); }          catch(e){ warnings.push(`${it.name}: JPEG comment not written (${e.message})`); }
+          jpegScan(out); // sanity check before writing to disk
+        }
         const w = await it.handle.createWritable(); await w.write(out); await w.close();
       }
       it.metaP = null; it.readErr = null; await ensureMeta(it); n++;
@@ -652,7 +829,7 @@ async function save(andNext){
   }
   saving = false; $("saveBtn").disabled = $("saveNextBtn").disabled = false;
   dirty.clear(); buildDatalists(); updateStat();
-  if(errors.length) alert(`Saved ${n} of ${its.length}.\n\n` + errors.join("\n"));
+  if(errors.length || warnings.length) alert(`Saved ${n} of ${its.length}.\n\n` + errors.concat(warnings).join("\n"));
   else toast(`Saved ${n} photo${n === 1 ? "" : "s"}`);
   if(andNext && !errors.length){
     const order = visible.map(i => i.idx), pos = order.indexOf(its[its.length-1].idx);
